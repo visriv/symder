@@ -32,3 +32,5 @@ final_model.pt
 
 # Ignore experiment directories
 exp_dir/
+wandb/
+runs/
