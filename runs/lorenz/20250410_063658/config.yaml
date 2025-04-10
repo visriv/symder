@@ -1,0 +1,39 @@
+wandb:
+  project: symrecon
+  entity: visriv
+  name: null
+  team: null
+training:
+  n_steps: 50000
+  log_interval: 100
+  save_interval: 1000
+  sparse_thres: 0.001
+  sparse_interval: 5000
+model:
+  hidden_size: 128
+  pad: 4
+  dt: 0.01
+  tmax: 100.02
+optimizer:
+  encoder:
+    type: adabelief
+    learning_rate: 0.001
+    eps: 1.0e-16
+  sym_model:
+    type: adabelief
+    learning_rate: 0.001
+    eps: 1.0e-16
+loss:
+  deriv_weight:
+  - 1.0
+  - 1.0
+  reg_dzdt: 0
+  reg_l1_sparse: 0
+data:
+  dataset_path: ./data/lorenz.npz
+  visible_vars:
+  - 0
+  - 1
+  num_der: 2
+output:
+  base_dir: ./runs/lorenz

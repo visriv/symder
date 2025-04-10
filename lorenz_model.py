@@ -4,10 +4,15 @@ import numpy as np
 
 import haiku as hk
 import optax
-
+import wandb
+from tqdm.auto import tqdm
+import matplotlib.pyplot as plt
+import seaborn as sns
+from datetime import datetime
 import os.path
 import argparse
 from functools import partial
+from omegaconf import OmegaConf, DictConfig
 
 # from tqdm.auto import tqdm
 
@@ -92,6 +97,10 @@ def train(
     sparse_thres=None,
     sparse_interval=None,
     key_seq=hk.PRNGSequence(42),
+    exp_dir=None,
+    log_interval=100,
+    save_interval=1000,
+    early_stopping_config=None,
 ):
 
     # JIT compile gradient function
@@ -109,7 +118,6 @@ def train(
     update_params = jax.jit(update_params)
 
     # Get batch and target
-    # TODO: replace this with call to a data generator/data loader
     if loss_fn_args["reg_dzdt"] is not None:
         batch = scaled_data[None, :, :, :2]  # batch, time, num_visible, 2
     else:
@@ -123,12 +131,25 @@ def train(
 
     # Training loop
     print(f"Training for {n_steps} steps...")
+    pbar = tqdm(range(n_steps), desc="Training")
 
-    best_loss = np.float("inf")
+    best_loss = float("inf")
     best_params = None
+    loss_history = []
+    mse_history = []
+    reg_dzdt_history = []
+    reg_l1_sparse_history = []
 
-    for step in range(n_steps):
+    # Early stopping variables
+    if early_stopping_config and early_stopping_config.enabled:
+        patience = early_stopping_config.patience
+        min_delta = early_stopping_config.min_delta
+        min_steps = early_stopping_config.min_steps
+        best_loss_so_far = float("inf")
+        steps_without_improvement = 0
+        should_stop = False
 
+    for step in pbar:
         # Compute gradients and losses
         grads, loss_list = grad_loss(params, batch, target)
 
@@ -137,6 +158,21 @@ def train(
         if loss < best_loss:
             best_loss = loss
             best_params = jax.tree_map(lambda x: x.copy(), params)
+
+        # Early stopping check
+        if early_stopping_config and early_stopping_config.enabled:
+            if step >= min_steps:
+                if loss < best_loss_so_far - min_delta:
+                    best_loss_so_far = loss
+                    steps_without_improvement = 0
+                else:
+                    steps_without_improvement += 1
+                
+                if steps_without_improvement >= patience:
+                    should_stop = True
+                    print(f"\nEarly stopping triggered at step {step}")
+                    print(f"Best loss: {best_loss_so_far:.6f}")
+                    break
 
         # Update sparse_mask based on a threshold
         if sparsify and step > 0 and step % sparse_interval == 0:
@@ -149,18 +185,120 @@ def train(
             grads, opt_state, params, sparse_mask
         )
 
-        # Print loss
-        if step % 1000 == 0:
-            loss, mse, reg_dzdt, reg_l1_sparse = loss_list
-            print(
-                f"Loss[{step}] = {loss}, MSE = {mse}, "
-                f"Reg. dz/dt = {reg_dzdt}, Reg. L1 Sparse = {reg_l1_sparse}"
+        # Log metrics
+        loss, mse, reg_dzdt, reg_l1_sparse = loss_list
+        loss_history.append(loss)
+        mse_history.append(mse)
+        reg_dzdt_history.append(reg_dzdt)
+        reg_l1_sparse_history.append(reg_l1_sparse)
+
+        # Update progress bar
+        pbar.set_postfix({
+            'loss': f'{loss:.4f}',
+            'mse': f'{mse:.4f}',
+            'best_loss': f'{best_loss:.4f}'
+        })
+
+        # Log to wandb and save checkpoints
+        if step % log_interval == 0:
+            wandb.log({
+                'loss': loss,
+                'mse': mse,
+                'reg_dzdt': reg_dzdt,
+                'reg_l1_sparse': reg_l1_sparse,
+                'best_loss': best_loss,
+                'step': step
+            })
+
+            # Plot and save loss curves
+            plt.figure(figsize=(10, 6))
+            plt.plot(loss_history, label='Loss')
+            plt.plot(mse_history, label='MSE')
+            plt.plot(reg_dzdt_history, label='Reg dz/dt')
+            plt.plot(reg_l1_sparse_history, label='Reg L1 Sparse')
+            plt.xlabel('Steps')
+            plt.ylabel('Value')
+            plt.title('Training Metrics')
+            plt.legend()
+            plt.savefig(os.path.join(exp_dir, 'loss_curves.png'))
+            plt.close()
+
+        # Save checkpoint
+        if step % save_interval == 0:
+            checkpoint_path = os.path.join(exp_dir, f'checkpoint_{step:06d}.pt')
+            save_pytree(
+                checkpoint_path,
+                {
+                    'params': params,
+                    'best_params': best_params,
+                    'sparse_mask': sparse_mask,
+                    'opt_state': opt_state,
+                    'step': step,
+                    'loss': loss,
+                    'best_loss': best_loss
+                }
             )
-            print(params["sym_model"])
+
+    # Final visualization of model parameters
+    plt.figure(figsize=(15, 10))
+    
+    # Debug print to understand the structure
+    print("\nModel parameters structure:")
+    for key, value in params["sym_model"].items():
+        print(f"{key}: {type(value)}")
+        if isinstance(value, dict):
+            for subkey, subvalue in value.items():
+                if hasattr(subvalue, 'shape'):
+                    print(f"  {subkey}: shape = {subvalue.shape}")
+                else:
+                    print(f"  {subkey}: {type(subvalue)}")
+    
+    # Create subplots for each component
+    fig, axes = plt.subplots(2, 1, figsize=(15, 10))
+    fig.suptitle('Model Parameters', fontsize=16)
+    
+    # Plot linear component
+    if 'linear' in params["sym_model"]:
+        linear_params = params["sym_model"]["linear"]
+        if isinstance(linear_params, dict):
+            # Try to find weights and bias
+            if 'w' in linear_params and hasattr(linear_params['w'], 'shape'):
+                sns.heatmap(linear_params['w'], annot=True, fmt='.2f', cmap='RdBu', ax=axes[0])
+                axes[0].set_title('Linear Weights')
+            elif 'b' in linear_params and hasattr(linear_params['b'], 'shape'):
+                sns.heatmap(linear_params['b'].reshape(1, -1), annot=True, fmt='.2f', cmap='RdBu', ax=axes[0])
+                axes[0].set_title('Linear Bias')
+            else:
+                axes[0].text(0.5, 0.5, str(linear_params), 
+                           horizontalalignment='center', verticalalignment='center')
+                axes[0].set_title('Linear Parameters (Text Format)')
+    
+    # Plot quadratic component
+    if 'quadratic' in params["sym_model"]:
+        quad_params = params["sym_model"]["quadratic"]
+        if isinstance(quad_params, dict):
+            # Try to find weights
+            if 'w' in quad_params and hasattr(quad_params['w'], 'shape'):
+                # Visualize the first slice of the 3D array
+                sns.heatmap(quad_params['w'][0], annot=True, fmt='.2f', cmap='RdBu', ax=axes[1])
+                axes[1].set_title('Quadratic Weights (First Slice)')
+            else:
+                axes[1].text(0.5, 0.5, str(quad_params), 
+                          horizontalalignment='center', verticalalignment='center')
+                axes[1].set_title('Quadratic Parameters (Text Format)')
+    
+    plt.tight_layout()
+    plt.savefig(os.path.join(exp_dir, 'final_params.png'))
+    plt.close()
 
     print("\nBest loss:", best_loss)
     print("Best sym_model params:", best_params["sym_model"])
     return best_loss, best_params, sparse_mask
+
+
+
+
+
 
 
 if __name__ == "__main__":
@@ -169,71 +307,89 @@ if __name__ == "__main__":
         description="Run SymDer model on Lorenz system data."
     )
     parser.add_argument(
-        "-o",
-        "--output",
+        "--config",
         type=str,
-        default="./lorenz_run0/",
-        help="Output folder path. Default: ./lorenz_run0/",
+        default="configs/default.yaml",
+        help="Path to config file",
     )
     parser.add_argument(
-        "-d",
-        "--dataset",
+        "--override",
         type=str,
-        default="./data/lorenz.npz",
-        help=(
-            "Path to Lorenz system dataset (generated and saved "
-            "if it does not exist). Default: ./data/lorenz.npz"
-        ),
-    )
-    parser.add_argument(
-        "-v",
-        "--visible",
-        type=int,
-        nargs="+",
-        default=[0, 1],
-        help="List of visible variables (0, 1, and/or 2). Default: 0 1",
+        nargs="*",
+        help="Override config parameters. Format: key1=value1 key2=value2",
     )
     args = parser.parse_args()
+
+    # Load config
+    config = OmegaConf.load(args.config)
+    
+    # Override config with command line arguments
+    if args.override:
+        override_config = OmegaConf.from_dotlist(args.override)
+        config = OmegaConf.merge(config, override_config)
+
+    # Create experiment directory with timestamp
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    exp_dir = os.path.join(config.output.base_dir, timestamp)
+    os.makedirs(exp_dir, exist_ok=True)
+    
+    # Save config
+    OmegaConf.save(config, os.path.join(exp_dir, "config.yaml"))
+    
+    # Initialize wandb
+    wandb_config = {
+        "project": config.wandb.project,
+        "entity": config.wandb.entity,
+        "config": OmegaConf.to_container(config),
+        "name": f"lorenz_{timestamp}",
+    }
+    
+    # If team is explicitly set to null, remove entity to use personal account
+    if hasattr(config.wandb, 'team') and config.wandb.team is None:
+        wandb_config.pop('entity', None)
+    
+    wandb.init(**wandb_config)
 
     # Seed random number generator
     key_seq = hk.PRNGSequence(42)
 
     # Set SymDer parameters
-    num_visible = len(args.visible)  # 2
-    num_hidden = 3 - num_visible  # 1
-    num_der = 2
+    num_visible = len(config.data.visible_vars)
+    num_hidden = 3 - num_visible
+    num_der = config.data.num_der
 
     # Set dataset parameters and load/generate dataset
-    dt = 1e-2
-    tmax = 100 + 2 * dt
+    dt = config.model.dt
+    tmax = config.model.tmax
     scaled_data, scale, raw_sol = get_dataset(
-        args.dataset,
+        config.data.dataset_path,
         generate_dataset,
         get_raw_sol=True,
         dt=dt,
         tmax=tmax,
         num_visible=num_visible,
-        visible_vars=args.visible,
+        visible_vars=config.data.visible_vars,
         num_der=num_der,
     )
 
-    # Set training hyperparameters
-    n_steps = 50000
-    sparse_thres = 1e-3  # 5e-3
-    sparse_interval = 5000
-
     # Define optimizers
     optimizers = {
-        "encoder": optax.adabelief(1e-3, eps=1e-16),
-        "sym_model": optax.adabelief(1e-3, eps=1e-16),
+        "encoder": optax.adabelief(
+            config.optimizer.encoder.learning_rate,
+            eps=config.optimizer.encoder.eps
+        ),
+        "sym_model": optax.adabelief(
+            config.optimizer.sym_model.learning_rate,
+            eps=config.optimizer.sym_model.eps
+        ),
     }
 
     # Set loss function hyperparameters
     loss_fn_args = {
         "scale": jnp.array(scale),
-        "deriv_weight": jnp.array([1.0, 1.0]),
-        "reg_dzdt": 0,
-        "reg_l1_sparse": 0,
+        "deriv_weight": jnp.array(config.loss.deriv_weight),
+        "reg_dzdt": config.loss.reg_dzdt,
+        "reg_l1_sparse": config.loss.reg_l1_sparse,
     }
     get_dzdt = loss_fn_args["reg_dzdt"] is not None
 
@@ -259,21 +415,40 @@ if __name__ == "__main__":
 
     # Train
     best_loss, best_params, sparse_mask = train(
-        n_steps,
+        config.training.n_steps,
         model_apply,
         params,
         scaled_data,
         loss_fn_args=loss_fn_args,
         data_args={"pad": model_args["pad"]},
         optimizers=optimizers,
-        sparse_thres=sparse_thres,
-        sparse_interval=sparse_interval,
+        sparse_thres=config.training.sparse_thres,
+        sparse_interval=config.training.sparse_interval,
         key_seq=key_seq,
+        exp_dir=exp_dir,
+        log_interval=config.training.log_interval,
+        save_interval=config.training.save_interval,
+        early_stopping_config=config.training.early_stopping,
     )
 
-    # Save model parameters and sparse mask
-    print(f"Saving best model parameters in output folder: {args.output}")
+    # Save final model parameters and sparse mask
+    print(f"Saving final model parameters in output folder: {exp_dir}")
     save_pytree(
-        os.path.join(args.output, "best.pt"),
-        {"params": best_params, "sparse_mask": sparse_mask},
+        os.path.join(exp_dir, "final_model.pt"),
+        {
+            "params": best_params,
+            "sparse_mask": sparse_mask,
+            "config": OmegaConf.to_container(config),
+            "best_loss": best_loss,
+        },
     )
+
+    # Log final metrics to wandb
+    wandb.log({
+        "final_loss": best_loss,
+        "final_model_params": wandb.Image(os.path.join(exp_dir, 'final_params.png')),
+        "loss_curves": wandb.Image(os.path.join(exp_dir, 'loss_curves.png')),
+    })
+
+    # Finish wandb run
+    wandb.finish()

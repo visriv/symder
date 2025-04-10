@@ -16,3 +16,19 @@ out_*
 
 # VSCode settings
 .vscode/
+
+
+# Ignore logs
+*.log
+
+# Ignore images
+*.png
+*.jpg
+*.jpeg
+
+# Ignore checkpoints
+checkpoint_*.pt
+final_model.pt
+
+# Ignore experiment directories
+exp_dir/

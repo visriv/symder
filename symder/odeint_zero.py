@@ -1,6 +1,7 @@
 import jax
 import jax.numpy as jnp
 from functools import partial
+from jax.tree_util import tree_map
 
 __all__ = ["odeint_zero", "dfunc", "d_dt"]
 
@@ -22,7 +23,7 @@ def odeint_zero_jvp(func, primals, tangents):
     dydt = func(y, t, *args)
 
     # Compute JVP: dy = dy/dy0 * dy0 + dy/dt * dt, where dy/dy0 = 1
-    dy = jax.tree_multimap(
+    dy = tree_map(
         lambda dy0_, dydt_: dy0_ + dydt_ * jnp.broadcast_to(dt, dydt_.shape), dy0, dydt
     )
     return y, dy

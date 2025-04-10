@@ -1,7 +1,7 @@
 import jax
 import jax.numpy as jnp
 from jax import lax
-from jax.tree_util import pytree
+from jax.tree_util import tree_structure as pytree, tree_map
 
 import optax
 
@@ -188,7 +188,7 @@ def init_optimizers(
     # Define update function
     def update_params(grads, opt_state, params, sparse_mask):
         if sparsify:
-            grads[sym_model_name] = jax.tree_multimap(
+            grads[sym_model_name] = tree_map(
                 jnp.multiply, sparse_mask, grads[sym_model_name]
             )
 
@@ -200,7 +200,7 @@ def init_optimizers(
         params = optax.apply_updates(params, updates)
 
         if sparsify:
-            params[sym_model_name] = jax.tree_multimap(
+            params[sym_model_name] = tree_map(
                 jnp.multiply, sparse_mask, params[sym_model_name]
             )
 

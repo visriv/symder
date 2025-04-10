@@ -1,0 +1,52 @@
+# Wandb configuration
+wandb:
+  project: "symrecon"
+  entity: "visriv"  # Your personal account
+  name: null  # Will be set automatically with timestamp
+
+# Training configuration
+training:
+  n_steps: 1000
+  log_interval: 100
+  save_interval: 1000
+  sparse_thres: 1e-3
+  sparse_interval: 5000
+  early_stopping:
+    enabled: True
+    patience: 1000  # Number of steps to wait for improvement
+    min_delta: 1e-4  # Minimum change to qualify as an improvement
+    min_steps: 5000  # Minimum number of steps before early stopping can occur
+
+# Model configuration
+model:
+  hidden_size: 128
+  pad: 4
+  dt: 1e-2
+  tmax: 100.02
+
+# Optimizer configuration
+optimizer:
+  encoder:
+    type: "adabelief"
+    learning_rate: 1e-3
+    eps: 1e-16
+  sym_model:
+    type: "adabelief"
+    learning_rate: 1e-3
+    eps: 1e-16
+
+# Loss function configuration
+loss:
+  deriv_weight: [1.0, 1.0]
+  reg_dzdt: 0
+  reg_l1_sparse: 0
+
+# Data configuration
+data:
+  dataset_path: "./data/lorenz.npz"
+  visible_vars: [0, 1]
+  num_der: 2
+
+# Output configuration
+output:
+  base_dir: "./runs/lorenz" 
