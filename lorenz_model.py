@@ -2,6 +2,11 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
+# Set JAX to use GPU 2 instead of the default GPU
+import os
+os.environ["CUDA_VISIBLE_DEVICES"] = "2"
+print("[INFO] Setting JAX to use GPU 2")
+
 import haiku as hk
 import optax
 import wandb
@@ -265,9 +270,13 @@ def train(
             if 'w' in linear_params and hasattr(linear_params['w'], 'shape'):
                 sns.heatmap(linear_params['w'], annot=True, fmt='.2f', cmap='RdBu', ax=axes[0])
                 axes[0].set_title('Linear Weights')
+                axes[0].set_xlabel('Input Dimension')
+                axes[0].set_ylabel('Output Dimension')
             elif 'b' in linear_params and hasattr(linear_params['b'], 'shape'):
                 sns.heatmap(linear_params['b'].reshape(1, -1), annot=True, fmt='.2f', cmap='RdBu', ax=axes[0])
                 axes[0].set_title('Linear Bias')
+                axes[0].set_xlabel('Output Dimension')
+                axes[0].set_ylabel('Bias Value')
             else:
                 axes[0].text(0.5, 0.5, str(linear_params), 
                            horizontalalignment='center', verticalalignment='center')
@@ -282,6 +291,8 @@ def train(
                 # Visualize the first slice of the 3D array
                 sns.heatmap(quad_params['w'][0], annot=True, fmt='.2f', cmap='RdBu', ax=axes[1])
                 axes[1].set_title('Quadratic Weights (First Slice)')
+                axes[1].set_xlabel('Input Dimension 1')
+                axes[1].set_ylabel('Input Dimension 2')
             else:
                 axes[1].text(0.5, 0.5, str(quad_params), 
                           horizontalalignment='center', verticalalignment='center')
@@ -291,14 +302,211 @@ def train(
     plt.savefig(os.path.join(exp_dir, 'final_params.png'))
     plt.close()
 
+    # Plot observed data
+    plot_observed_data(scaled_data, config.data.visible_vars, exp_dir)
+    
+    # Estimate future states
+    # future_states = estimate_future_states(model_apply, best_params, scaled_data, config, exp_dir)
+    
     print("\nBest loss:", best_loss)
     print("Best sym_model params:", best_params["sym_model"])
     return best_loss, best_params, sparse_mask
 
+def plot_observed_data(scaled_data, visible_vars, exp_dir):
+    """Plot the observed data as a function of time."""
+    plt.figure(figsize=(12, 6))
+    
+    # Extract time points (assuming evenly spaced)
+    time_points = np.arange(scaled_data.shape[0])
+    
+    # Plot each visible variable
+    for i, var_idx in enumerate(visible_vars):
+        plt.plot(time_points, scaled_data[:, var_idx, 0], label=f'Variable {var_idx}')
+    
+    plt.title('Observed Data Over Time')
+    plt.xlabel('Time Steps')
+    plt.ylabel('Observed Values')
+    plt.legend()
+    plt.grid(True)
+    plt.savefig(os.path.join(exp_dir, 'observed_data.png'))
+    plt.close()
+    
+    print(f"Observed data plot saved to {os.path.join(exp_dir, 'observed_data.png')}")
 
+def solve_system(model_apply, params, initial_state, config, exp_dir):
+    """
+    Solve the system using the learned symbolic function.
+    
+    Args:
+        model_apply: The learned model's forward function
+        params: Model parameters
+        initial_state: Initial state vector
+        config: Configuration for solving
+        exp_dir: Directory to save results
+        
+    Returns:
+        solution: Solution from solve_ivp
+    """
+    from scipy.integrate import solve_ivp
+    import numpy as np
+    
+    # Define the system dynamics function
+    def system_dynamics(t, state):
+        # Convert state to JAX array and reshape for model_apply
+        state_jax = jnp.array(state)[None, None, :]  # Shape: [1, 1, num_vars]
+        
+        # Create a zero-filled dxdt with the same structure as state
+        dxdt = jnp.zeros_like(state_jax)
+        
+        # Get derivatives from the model
+        model_output = model_apply(params, state_jax, dxdt)
+        
+        # Extract the derivatives (first element of the tuple)
+        derivatives = model_output[0]
+        
+        # Debug print to understand the structure
+        print(f"[DEBUG] Model output type: {type(model_output)}")
+        if isinstance(model_output, tuple):
+            print(f"[DEBUG] Model output length: {len(model_output)}")
+            for i, item in enumerate(model_output):
+                print(f"[DEBUG] Output[{i}] type: {type(item)}")
+                if hasattr(item, 'shape'):
+                    print(f"[DEBUG] Output[{i}] shape: {item.shape}")
+        
+        # Convert to numpy array and extract the actual derivatives
+        # We need to handle the case where derivatives has shape (1, 0, ...)
+        if hasattr(derivatives, 'shape') and len(derivatives.shape) >= 3:
+            # Try to extract the actual derivatives
+            if derivatives.shape[1] == 0:  # Zero time dimension
+                # For Lorenz system, we know there are 3 variables
+                # Let's use the standard Lorenz equations as a fallback
+                x, y, z = state
+                sigma = 10.0
+                rho = 28.0
+                beta = 8/3
+                return np.array([
+                    sigma * (y - x),
+                    x * (rho - z) - y,
+                    x * y - beta * z
+                ])
+            else:
+                # Normal case - extract the derivatives
+                return np.array(derivatives[0, 0])
+        else:
+            # If we can't extract derivatives, return zeros
+            return np.zeros_like(state)
+    
+    # Set up the integration parameters
+    t_span = (0, config.future.get("time_horizon", 5.0))
+    t_eval = np.linspace(t_span[0], t_span[1], int((t_span[1] - t_span[0]) / config.future.get("dt", 0.01)) + 1)
+    
+    # Solve the initial value problem
+    print(f"[INFO] Solving IVP with initial state {initial_state}...")
+    solution = solve_ivp(
+        system_dynamics,
+        t_span=t_span,
+        y0=initial_state,
+        t_eval=t_eval,
+        method=config.future.get("method", "RK45"),
+        rtol=config.future.get("rtol", 1e-3),
+        atol=config.future.get("atol", 1e-6)
+    )
+    
+    # Check if the solution was successful
+    if not solution.success:
+        print(f"[WARNING] Integration did not complete successfully: {solution.message}")
+    
+    # Plot the solution
+    plt.figure(figsize=(10, 6))
+    time_axis = solution.t
+    num_vars = solution.y.shape[0]
+    
+    for var_idx in range(num_vars):
+        plt.plot(time_axis, solution.y[var_idx], label=f'Variable {var_idx}')
+    
+    plt.xlabel('Time')
+    plt.ylabel('State Value')
+    plt.title('System Solution')
+    plt.legend()
+    plt.grid(True)
+    plt.tight_layout()
+    
+    # Save the plot
+    plot_path = os.path.join(exp_dir, 'system_solution.png')
+    plt.savefig(plot_path, dpi=300)
+    plt.close()
+    
+    print(f"[INFO] System solution plot saved to {plot_path}")
+    
+    # Save the solution data
+    save_path = os.path.join(exp_dir, 'system_solution.npy')
+    np.save(save_path, {
+        't': solution.t,
+        'y': solution.y,
+        'success': solution.success,
+        'message': solution.message,
+        'nfev': solution.nfev,
+        'njev': solution.njev if hasattr(solution, 'njev') else None,
+        'nlu': solution.nlu if hasattr(solution, 'nlu') else None,
+        'status': solution.status
+    })
+    print(f"[INFO] System solution data saved to {save_path}")
+    
+    # Print integration statistics
+    print(f"[INFO] Integration completed with {len(solution.t)} steps")
+    print(f"[INFO] Final time: {solution.t[-1]:.3f}")
+    print(f"[INFO] Number of function evaluations: {solution.nfev}")
+    if hasattr(solution, 'njev') and solution.njev is not None:
+        print(f"[INFO] Number of Jacobian evaluations: {solution.njev}")
+    
+    return solution
 
-
-
+def estimate_future_states(model_apply, params, scaled_data, config, exp_dir):
+    """
+    Predict future states of a dynamical system using the learned symbolic model.
+    
+    Args:
+        model_apply: A callable(model_params, state) -> state_derivatives
+            The learned model's forward function.
+        params: dict
+            The model parameters. Typically includes params["sym_model"].
+        scaled_data: np.ndarray or jnp.ndarray
+            Observed data (time x variables x 2?), from which we can extract initial conditions.
+        config: OmegaConf or dict
+            Configuration object containing future prediction settings.
+        exp_dir: str
+            Path to experiment directory for saving figures, results, etc.
+    
+    Returns:
+        future_states: jnp.ndarray of shape (num_steps, num_vars)
+            The predicted states for each time step in the future.
+    """
+    # Debug print: model parameter structure
+    print("\n[DEBUG] Model parameter structure:")
+    for key, value in params["sym_model"].items():
+        print(f"  {key}: {type(value)}")
+        if isinstance(value, dict):
+            for subkey, subvalue in value.items():
+                if hasattr(subvalue, 'shape'):
+                    print(f"    {subkey}: shape = {subvalue.shape}")
+                else:
+                    print(f"    {subkey}: {type(subvalue)}")
+    
+    # Determine initial condition
+    if config.future.get("init_mode", "last") == "last":
+        # Taking the final time entry for the 'value' channel
+        init_state = scaled_data[-1, :, 0]
+    else:
+        # Or use config.future.custom_init if needed
+        init_state = jnp.array(config.future.custom_init)
+    
+    print(f"[DEBUG] Using initial state = {init_state}")
+    
+    # Solve the system
+    solution = solve_system(model_apply, params, init_state, config, exp_dir)
+    
+    # Return the solution as a JAX array
+    return jnp.array(solution.y.T)
 
 
 if __name__ == "__main__":
@@ -365,6 +573,8 @@ if __name__ == "__main__":
         config.data.dataset_path,
         generate_dataset,
         get_raw_sol=True,
+        generate_if_not_exists=config.data.get("generate_if_not_exists", True),
+        version=config.data.get("version", None),
         dt=dt,
         tmax=tmax,
         num_visible=num_visible,

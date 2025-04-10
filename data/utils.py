@@ -72,40 +72,106 @@ def generate_diff_kernels(order):
     return kernels
 
 
-def get_dataset(filename, generate_dataset, get_raw_sol=False, **gen_kwargs):
-    if os.path.isfile(filename):
-        scaled_data, scale, loaded_gen_kwargs, raw_sol = load_dataset(
-            filename, get_raw_sol
-        )
-        assert gen_kwargs == loaded_gen_kwargs
+def get_dataset(filename, generate_dataset, get_raw_sol=False, generate_if_not_exists=True, version=None, **gen_kwargs):
+    """
+    Get a dataset, either by loading from file or generating it.
+    
+    Args:
+        filename: Path to the dataset file
+        generate_dataset: Function to generate the dataset
+        get_raw_sol: Whether to return the raw solution
+        generate_if_not_exists: Whether to generate the dataset if it doesn't exist
+        version: Version tag for the dataset
+        **gen_kwargs: Additional arguments to pass to generate_dataset
+        
+    Returns:
+        Tuple of (scaled_data, scale, raw_sol) if get_raw_sol is True,
+        otherwise (scaled_data, scale)
+    """
+    # Add version to filename if provided
+    if version:
+        base, ext = os.path.splitext(filename)
+        versioned_filename = f"{base}_{version}{ext}"
     else:
-        scaled_data, scale, raw_sol = generate_dataset(
-            raw_sol=get_raw_sol, **gen_kwargs
+        versioned_filename = filename
+    
+    # Check if the dataset exists
+    if os.path.isfile(versioned_filename):
+        print(f"Dataset found at {versioned_filename}")
+        scaled_data, scale, loaded_gen_kwargs, raw_sol = load_dataset(
+            versioned_filename, get_raw_sol
         )
-        save_dataset(filename, scaled_data, scale, gen_kwargs, raw_sol)
+        
+        # Check if the loaded dataset matches the requested parameters
+        # We'll do a simple check for the most important parameters
+        for key in ['dt', 'tmax', 'num_visible', 'visible_vars', 'num_der']:
+            if key in gen_kwargs and key in loaded_gen_kwargs:
+                if gen_kwargs[key] != loaded_gen_kwargs[key]:
+                    print(f"Warning: Parameter mismatch for {key}. Requested: {gen_kwargs[key]}, Loaded: {loaded_gen_kwargs[key]}")
+                    if generate_if_not_exists:
+                        print(f"Generating new dataset with requested parameters...")
+                        scaled_data, scale, raw_sol = generate_dataset(
+                            raw_sol=get_raw_sol, **gen_kwargs
+                        )
+                        save_dataset(versioned_filename, scaled_data, scale, gen_kwargs, raw_sol)
+                        break
+    else:
+        if generate_if_not_exists:
+            print(f"Dataset not found at {versioned_filename}. Generating new dataset...")
+            # Create directory if it doesn't exist
+            os.makedirs(os.path.dirname(versioned_filename), exist_ok=True)
+            
+            scaled_data, scale, raw_sol = generate_dataset(
+                raw_sol=get_raw_sol, **gen_kwargs
+            )
+            save_dataset(versioned_filename, scaled_data, scale, gen_kwargs, raw_sol)
+        else:
+            raise FileNotFoundError(f"Dataset not found at {versioned_filename} and generate_if_not_exists is False.")
+    
     return (scaled_data, scale, raw_sol) if get_raw_sol else (scaled_data, scale)
 
 
 def save_dataset(filename, scaled_data, scale, gen_kwargs, raw_sol=None):
-    if not os.path.isfile(filename):
-        print(f"Saving dataset to file: {filename}")
-        np.savez(
-            filename,
-            scaled_data=scaled_data,
-            scale=scale,
-            gen_kwargs=gen_kwargs,
-            raw_sol=raw_sol,
-        )
-    else:
-        raise FileExistsError(f"{filename} already exists! Dataset is not saved.")
+    """
+    Save a dataset to a file.
+    
+    Args:
+        filename: Path to save the dataset
+        scaled_data: The scaled data
+        scale: The scale factors
+        gen_kwargs: The generation parameters
+        raw_sol: The raw solution (optional)
+    """
+    # Create directory if it doesn't exist
+    os.makedirs(os.path.dirname(filename), exist_ok=True)
+    
+    print(f"Saving dataset to file: {filename}")
+    np.savez(
+        filename,
+        scaled_data=scaled_data,
+        scale=scale,
+        gen_kwargs=gen_kwargs,
+        raw_sol=raw_sol,
+    )
+    print(f"Dataset saved successfully.")
 
 
 def load_dataset(filename, get_raw_sol=False):
+    """
+    Load a dataset from a file.
+    
+    Args:
+        filename: Path to the dataset file
+        get_raw_sol: Whether to return the raw solution
+        
+    Returns:
+        Tuple of (scaled_data, scale, gen_kwargs, raw_sol)
+    """
     print(f"Loading dataset from file: {filename}")
     dataset = np.load(filename, allow_pickle=True)
     return (
         dataset["scaled_data"],
         dataset["scale"],
-        dataset["gen_kwargs"],
-        dataset["raw_sol"] if get_raw_sol else None,
+        dataset["gen_kwargs"].item(),  # Convert to dict
+        dataset["raw_sol"] if get_raw_sol and "raw_sol" in dataset else None,
     )

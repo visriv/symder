@@ -6,8 +6,8 @@ wandb:
 
 # Training configuration
 training:
-  n_steps: 1000
-  log_interval: 100
+  n_steps: 10000
+  log_interval: 1000
   save_interval: 1000
   sparse_thres: 1e-3
   sparse_interval: 5000
@@ -43,10 +43,21 @@ loss:
 
 # Data configuration
 data:
-  dataset_path: "./data/lorenz.npz"
-  visible_vars: [0, 1]
-  num_der: 2
+  dataset_path: "./data/lorenz.npz"  # Path to save/load the dataset
+  generate_if_not_exists: true  # Generate dataset if it doesn't exist
+  version: "v1"  # Version tag for the dataset
+  visible_vars: [0, 1, 2]  # Which variables to observe
+  num_der: 2  # Number of derivatives to compute
 
 # Output configuration
 output:
-  base_dir: "./runs/lorenz" 
+  base_dir: "./runs/lorenz"
+
+# Future configuration
+future:
+  init_mode: "last"  # or "custom"
+  time_horizon: 5.0  # seconds to predict into future
+  dt: 0.01          # time step for output points
+  method: "RK45"    # integration method (RK45, RK23, DOP853, etc.)
+  rtol: 1.0e-3      # relative tolerance
+  atol: 1.0e-6      # absolute tolerance 

@@ -64,6 +64,16 @@ def loss_fn(
         sym_deriv_x, z_hidden, dzdt_hidden, sym_dzdt_hidden = model_apply(
             params, x, dxdt
         )
+        
+        # Debug print to understand the structure
+        print(f"[DEBUG] dzdt_hidden shape: {dzdt_hidden.shape}")
+        print(f"[DEBUG] sym_dzdt_hidden shape: {sym_dzdt_hidden.shape}")
+        
+        # Handle the case where dzdt_hidden has a zero dimension
+        if hasattr(dzdt_hidden, 'shape') and len(dzdt_hidden.shape) >= 3 and dzdt_hidden.shape[2] == 0:
+            print("[DEBUG] dzdt_hidden has zero dimension, using zeros instead")
+            # Create a zero array with the same shape as sym_dzdt_hidden
+            dzdt_hidden = jnp.zeros_like(sym_dzdt_hidden)
     else:
         sym_deriv_x, z_hidden = model_apply(params, batch)
 
